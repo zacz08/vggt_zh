@@ -23,43 +23,76 @@
   year={2025}
 }
 ```
+---
+# Setup
 
-## Updates
+## 1. 工具准备
 
-- [July 29, 2025] We've updated the license for VGGT to permit **commercial use** (excluding military applications). All code in this repository is now under a commercial-use-friendly license. However, only the newly released checkpoint [**VGGT-1B-Commercial**](https://huggingface.co/facebook/VGGT-1B-Commercial) is licensed for commercial usage — the original checkpoint remains non-commercial. Full license details are available [here](https://github.com/facebookresearch/vggt/blob/main/LICENSE.txt). Access to the checkpoint requires completing an application form, which is processed by a system similar to LLaMA's approval workflow, automatically. The new checkpoint delivers similar performance to the original model. Please submit an issue if you notice a significant performance discrepancy.
-
-
-
-- [July 6, 2025] Training code is now available in the `training` folder, including an example to finetune VGGT on a custom dataset. 
-
-
-- [June 13, 2025] Honored to receive the Best Paper Award at CVPR 2025! Apologies if I’m slow to respond to queries or GitHub issues these days. If you’re interested, our oral presentation is available [here](https://docs.google.com/presentation/d/1JVuPnuZx6RgAy-U5Ezobg73XpBi7FrOh/edit?usp=sharing&ouid=107115712143490405606&rtpof=true&sd=true). Another long presentation can be found [here](https://docs.google.com/presentation/d/1aSv0e5PmH1mnwn2MowlJIajFUYZkjqgw/edit?usp=sharing&ouid=107115712143490405606&rtpof=true&sd=true) (Note: it’s shared in .pptx format with animations — quite large, but feel free to use it as a template if helpful.)
-
-
-- [June 2, 2025] Added a script to run VGGT and save predictions in COLMAP format, with bundle adjustment support optional. The saved COLMAP files can be directly used with [gsplat](https://github.com/nerfstudio-project/gsplat) or other NeRF/Gaussian splatting libraries.
-
-
-- [May 3, 2025] Evaluation code for reproducing our camera pose estimation results on Co3D is now available in the [evaluation](https://github.com/facebookresearch/vggt/tree/evaluation) branch. 
-
-
-## Overview
-
-Visual Geometry Grounded Transformer (VGGT, CVPR 2025) is a feed-forward neural network that directly infers all key 3D attributes of a scene, including extrinsic and intrinsic camera parameters, point maps, depth maps, and 3D point tracks, **from one, a few, or hundreds of its views, within seconds**.
-
-
-## Quick Start
-
-First, clone this repository to your local machine, and install the dependencies (torch, torchvision, numpy, Pillow, and huggingface_hub). 
-
+### 1.1 安装Anaconda/Miniconda
+Conda是一个包管理器，是Python开发几乎必备的工具，推荐安装轻量的Miniconda (约50MB)，在[官网](https://www.anaconda.com/download/success)下载并安装。安装过程中**所有选项全部勾选**（Windows）/**选择yes**（Linux）。
+安装完成后，在终端中运行以下命令初始化conda环境：
 ```bash
-git clone git@github.com:facebookresearch/vggt.git 
-cd vggt
-pip install -r requirements.txt
+conda init
 ```
+
+### 1.2 安装 VS Code
+Visual Studio Code（简称 VS Code） 是微软开发的一款轻量级开源**代码编辑器**。带有强大的插件生态和灵活的扩展功能。此后所有的代码，终端的命令行操作均可以在VS code中进行，[官网](https://code.visualstudio.com/)下载并安装即可。
+
+### 1.3 安装 Git
+- **Windows**: 在 [Git 官网](https://git-scm.com/downloads/) 下载并安装。安装过程中所有选项均选默认即可。安装后可在 `cmd` 或 PowerShell 中输入：`git --version`检查是否安装成功。
+- **Linux (Ubuntu 为例)**: 终端中执行以下命令进行安装
+  ```bash
+  sudo apt update
+  sudo apt install git -y
+  git --version
+  ```
+---
+## 2. 环境配置
+在VS Code中打开一个新终端，以下命令均在终端中执行。
+- 创建虚拟环境
+  ```bash
+  conda create -n vggt python=3.10 -y
+  ```
+- 激活创建的环境
+  ```bash
+  conda activate vggt
+  ```
+- 安装Pytorch和Torchvision：
+  **PyTorch**是当前最主流的深度学习框架，**Torchvision**是 PyTorch 在计算机视觉领域的配套工具库，主要包括常用数据集，图像预处理工具，预训练模型等。
+  ```bash
+  pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+  ```
+- 下载VGGT源代码
+  ```bash
+  git clone https://github.com/zacz08/vggt_zh.git
+  ```
+- 安装VGGT的依赖库
+  ```bash
+  cd vggt_zh
+  pip install -r requirements.txt
+  ```
 
 Alternatively, you can install VGGT as a package (<a href="docs/package.md">click here</a> for details).
 
 
+## 3. 交互式Demo
+- 安装用于可视化的依赖库：
+  ```bash
+  cd ~/vggt_zh   # 进入到VGGT的根目录下
+  pip install -r requirements_demo.txt
+  ```
+- 运行以下命令进行重建并在 viser 中可视化点云。注意，该命令需要仅包含图像的文件夹路径。
+  ```bash
+  python demo_viser.py --image_folder path/to/your/images/folder
+  ```
+  例如使用`example`文件夹中的`kitchen`示例，则运行：
+  ```bash
+  python demo_viser.py --image_folder examples/kitchen/images
+  ```
+  当终端里显示渲染完成后，使用浏览器打开``http://localhost:8080``查看结果。
+
+  
+---
 Now, try the model with just a few lines of code:
 
 ```python
@@ -241,47 +274,9 @@ We benchmark the runtime and GPU memory usage of VGGT's aggregator on a single N
 Note that these results were obtained using Flash Attention 3, which is faster than the default Flash Attention 2 implementation while maintaining almost the same memory usage. Feel free to compile Flash Attention 3 from source to get better performance.
 
 
-## Research Progression
-
-Our work builds upon a series of previous research projects. If you're interested in understanding how our research evolved, check out our previous works:
-
-
-<table border="0" cellspacing="0" cellpadding="0">
-  <tr>
-    <td align="left">
-      <a href="https://github.com/jytime/Deep-SfM-Revisited">Deep SfM Revisited</a>
-    </td>
-    <td style="white-space: pre;">──┐</td>
-    <td></td>
-  </tr>
-  <tr>
-    <td align="left">
-      <a href="https://github.com/facebookresearch/PoseDiffusion">PoseDiffusion</a>
-    </td>
-    <td style="white-space: pre;">─────►</td>
-    <td>
-      <a href="https://github.com/facebookresearch/vggsfm">VGGSfM</a> ──►
-      <a href="https://github.com/facebookresearch/vggt">VGGT</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="left">
-      <a href="https://github.com/facebookresearch/co-tracker">CoTracker</a>
-    </td>
-    <td style="white-space: pre;">──┘</td>
-    <td></td>
-  </tr>
-</table>
-
-
 ## Acknowledgements
 
 Thanks to these great repositories: [PoseDiffusion](https://github.com/facebookresearch/PoseDiffusion), [VGGSfM](https://github.com/facebookresearch/vggsfm), [CoTracker](https://github.com/facebookresearch/co-tracker), [DINOv2](https://github.com/facebookresearch/dinov2), [Dust3r](https://github.com/naver/dust3r), [Moge](https://github.com/microsoft/moge), [PyTorch3D](https://github.com/facebookresearch/pytorch3d), [Sky Segmentation](https://github.com/xiongzhu666/Sky-Segmentation-and-Post-processing), [Depth Anything V2](https://github.com/DepthAnything/Depth-Anything-V2), [Metric3D](https://github.com/YvanYin/Metric3D) and many other inspiring works in the community.
-
-## Checklist
-
-- [x] Release the training code
-- [ ] Release VGGT-500M and VGGT-200M
 
 
 ## License
