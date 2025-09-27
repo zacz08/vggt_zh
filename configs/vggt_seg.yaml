@@ -1,0 +1,63 @@
+model:
+  target: "bev.VGGTSeg.VGGTSeg"
+  params:
+    sequence_length: 3
+    feature_dim: 22
+    dataroot: './data/nuscenes'
+    version: 'v1.0-mini'  # Options: 'v1.0-trainval', 'v1.0-test', 'v1.0-mini'
+    filter_invisible_vehicles: True
+    ignore_index: 255   # Index to ignore in semantic segmentation (max value in RGB image)
+
+    # BEV settings
+    lift:
+      x_bound: [-50, 50, 0.5] # Forward and backward range in meters
+      y_bound: [-50, 50, 0.5] # Left and right range in meters
+      z_bound: [-10, 10, 20]  # Up and down range in meters
+      d_bound: [2, 50, 1]     # Depth range in meters
+      gt_depth: False
+    splat:
+      sigma_m: 0.8            # Gaussian sigma in *meters* (isotropic in world). It will become anisotropic in pixels if dx!=dy.
+      z_hist_bins: 16         # f >0, also render a per-pixel z histogram (normalized) with this many bins.
+      add_z_std: True         # output z_std channel if True.
+
+    # nuScenes image settings
+    image:
+      original_width: 1600
+      original_height: 900
+      resize_scale: 1
+      final_dim: [900, 1600]  # Final image dimension after resizing
+      top_crop: 0            # 900 * resize_scale - 672
+      names: ['CAM_FRONT_LEFT', 
+              'CAM_FRONT', 
+              'CAM_FRONT_RIGHT', 
+              'CAM_BACK_LEFT', 
+              'CAM_BACK', 
+              'CAM_BACK_RIGHT']
+      normalization: False
+
+    # semantic segmentation settings
+    semantic_seg:
+      hdmap:
+        layers: ['drivable_area',
+                'lane_divider',
+                'ped_crossing',
+                'walkway',
+                'stop_line',
+                'carpark_area']
+
+    # training configuration
+    data_config:
+      data_root: './data'
+      data_split_train: "train"
+      data_split_val: "val"
+      num_workers: 1
+      batch_size: 128   # 128 -> 30GB
+    trainer_config:
+      lr: !!float 1e-4
+      min_lr: !!float 1e-4
+      gpu_num: 1
+      precision: 32
+      epochs: 30
+      logger_freq: 200
+      val_after_epoch: 2
+      resume_path: null

@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 from torchvision import transforms as TF
 import numpy as np
+import torch.nn.functional as F
 
 
 def load_and_preprocess_images_square(image_path_list, target_size=1024):
@@ -226,5 +227,77 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
         # Verify shape is (1, C, H, W)
         if images.dim() == 3:
             images = images.unsqueeze(0)
+
+    return images
+
+
+def preprocess_image_batch(
+    images: torch.Tensor,
+    target_size: int = 518,
+    mode: str = "crop"
+):
+    """
+    Preprocess a batch of images on GPU.
+
+    Args:
+        images (Tensor): 
+            Shape (B, N, 3, H, W) or (N, 3, H, W).
+            - RGB, dtype can be uint8 [0,255] or float [0,1].
+        target_size (int): final target width (default: 518).
+        mode (str): "crop" or "pad".
+
+    Returns:
+        Tensor: (B, N, 3, H', W') or (N, 3, H', W'), float32, [0,1],
+                all sizes aligned, divisible by 14.
+    """
+    # --- Ensure batch dimension ---
+    has_batch_dim = (images.ndim == 5)
+    if not has_batch_dim:
+        images = images.unsqueeze(0)  # [1, N, 3, H, W]
+
+    B, N, C, H, W = images.shape
+
+    # --- Normalize to [0,1] ---
+    if images.dtype == torch.uint8:
+        images = images.float() / 255.0
+    elif images.max() > 1.1:
+        images = images / 255.0
+
+    # --- Flatten (B, N) into (B*N) ---
+    images = images.reshape(B * N, C, H, W)
+
+    # --- Compute resize size ---
+    if mode == "pad":
+        if W >= H:
+            new_w = target_size
+            new_h = round(H * (new_w / W) / 14) * 14
+        else:
+            new_h = target_size
+            new_w = round(W * (new_h / H) / 14) * 14
+    else:  # crop
+        new_w = target_size
+        new_h = round(H * (new_w / W) / 14) * 14
+
+    # --- Resize (GPU bicubic) ---
+    images = F.interpolate(images, size=(new_h, new_w), mode="bicubic", align_corners=True)
+
+    # --- Crop or Pad ---
+    if mode == "crop" and new_h > target_size:
+        start_y = (new_h - target_size) // 2
+        images = images[:, :, start_y:start_y + target_size, :]
+    elif mode == "pad":
+        pad_h = target_size - new_h
+        pad_w = target_size - new_w
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        images = F.pad(images, (pad_left, pad_right, pad_top, pad_bottom), value=1.0)
+
+    # --- Restore shape ---
+    images = images.reshape(B, N, C, images.shape[2], images.shape[3])
+
+    if not has_batch_dim:
+        images = images.squeeze(0)
 
     return images

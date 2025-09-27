@@ -147,3 +147,10 @@ skyseg.onnx
 # pixi environments
 .pixi
 *.egg-info
+
+# VS Code settings
+.vscode/
+
+# checkpoints
+checkpoints/
+yolov8n-seg.pt

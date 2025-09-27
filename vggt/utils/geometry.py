@@ -4,12 +4,11 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
+import PIL
 import torch
 import numpy as np
-
-
-from vggt.dependency.distortion import apply_distortion, iterative_undistortion, single_undistortion
+from pyquaternion import Quaternion
+from nuscenes.utils.geometry_utils import transform_matrix
 
 
 def unproject_depth_map_to_point_map(
@@ -45,10 +44,7 @@ def unproject_depth_map_to_point_map(
 
 
 def depth_to_world_coords_points(
-    depth_map: np.ndarray,
-    extrinsic: np.ndarray,
-    intrinsic: np.ndarray,
-    eps=1e-8,
+    depth_map: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray, eps=1e-8
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Convert a depth map to world coordinates.
@@ -169,156 +165,218 @@ def closed_form_inverse_se3(se3, R=None, T=None):
     return inverted_matrix
 
 
-# TODO: this code can be further cleaned up
 
 
-def project_world_points_to_camera_points_batch(world_points, cam_extrinsics):
+# ================ nuScenes Dataset related ================== 
+
+def resize_and_crop_image(img, resize_dims, crop):
+    # Bilinear resizing followed by cropping
+    img = img.resize(resize_dims, resample=PIL.Image.BILINEAR)
+    img = img.crop(crop)
+    return img
+
+
+def update_intrinsics(intrinsics, top_crop=0.0, left_crop=0.0, scale_width=1.0, scale_height=1.0):
     """
-    Transforms 3D points to 2D using extrinsic and intrinsic parameters.
+    Parameters
+    ----------
+        intrinsics: torch.Tensor (3, 3)
+        top_crop: float
+        left_crop: float
+        scale_width: float
+        scale_height: float
+    """
+    updated_intrinsics = intrinsics.clone()
+    # Adjust intrinsics scale due to resizing
+    updated_intrinsics[0, 0] *= scale_width
+    updated_intrinsics[0, 2] *= scale_width
+    updated_intrinsics[1, 1] *= scale_height
+    updated_intrinsics[1, 2] *= scale_height
+
+    # Adjust principal point due to cropping
+    updated_intrinsics[0, 2] -= left_crop
+    updated_intrinsics[1, 2] -= top_crop
+
+    return updated_intrinsics
+
+
+def calculate_birds_eye_view_parameters(x_bounds, y_bounds, z_bounds):
+    """
+    Parameters
+    ----------
+        x_bounds: Forward direction in the ego-car.
+        y_bounds: Sides
+        z_bounds: Height
+
+    Returns
+    -------
+        bev_resolution: Bird's-eye view bev_resolution
+        bev_start_position Bird's-eye view first element
+        bev_dimension Bird's-eye view tensor spatial dimension
+    """
+    bev_resolution = torch.tensor([row[2] for row in [x_bounds, y_bounds, z_bounds]])
+    bev_start_position = torch.tensor([row[0] + row[2] / 2.0 for row in [x_bounds, y_bounds, z_bounds]])
+    bev_dimension = torch.tensor([(row[1] - row[0]) / row[2] for row in [x_bounds, y_bounds, z_bounds]],
+                                 dtype=torch.long)
+
+    return bev_resolution, bev_start_position, bev_dimension
+
+
+def convert_egopose_to_matrix_numpy(egopose):
+    transformation_matrix = np.zeros((4, 4), dtype=np.float32)
+    rotation = Quaternion(egopose['rotation']).rotation_matrix
+    translation = np.array(egopose['translation'])
+    transformation_matrix[:3, :3] = rotation
+    transformation_matrix[:3, 3] = translation
+    transformation_matrix[3, 3] = 1.0
+    return transformation_matrix
+
+
+def mat2pose_vec(matrix: torch.Tensor):
+    """
+    Converts a 4x4 pose matrix into a 6-dof pose vector
     Args:
-        world_points (torch.Tensor): 3D points of shape BxSxHxWx3.
-        cam_extrinsics (torch.Tensor): Extrinsic parameters of shape BxSx3x4.
+        matrix (ndarray): 4x4 pose matrix
     Returns:
-    """
-    # TODO: merge this into project_world_points_to_cam
-    
-    # device = world_points.device
-    # with torch.autocast(device_type=device.type, enabled=False):
-    ones = torch.ones_like(world_points[..., :1])  # shape: (B, S, H, W, 1)
-    world_points_h = torch.cat([world_points, ones], dim=-1)  # shape: (B, S, H, W, 4)
-
-    # extrinsics: (B, S, 3, 4) -> (B, S, 1, 1, 3, 4)
-    extrinsics_exp = cam_extrinsics.unsqueeze(2).unsqueeze(3)
-
-    # world_points_h: (B, S, H, W, 4) -> (B, S, H, W, 4, 1)
-    world_points_h_exp = world_points_h.unsqueeze(-1)
-
-    # Now perform the matrix multiplication
-    # (B, S, 1, 1, 3, 4) @ (B, S, H, W, 4, 1) broadcasts to (B, S, H, W, 3, 1)
-    camera_points = torch.matmul(extrinsics_exp, world_points_h_exp).squeeze(-1)
-
-    return camera_points
-
-
-
-def project_world_points_to_cam(
-    world_points,
-    cam_extrinsics,
-    cam_intrinsics=None,
-    distortion_params=None,
-    default=0,
-    only_points_cam=False,
-):
-    """
-    Transforms 3D points to 2D using extrinsic and intrinsic parameters.
-    Args:
-        world_points (torch.Tensor): 3D points of shape Px3.
-        cam_extrinsics (torch.Tensor): Extrinsic parameters of shape Bx3x4.
-        cam_intrinsics (torch.Tensor): Intrinsic parameters of shape Bx3x3.
-        distortion_params (torch.Tensor): Extra parameters of shape BxN, which is used for radial distortion.
-    Returns:
-        torch.Tensor: Transformed 2D points of shape BxNx2.
-    """
-    device = world_points.device
-    # with torch.autocast(device_type=device.type, dtype=torch.double):
-    with torch.autocast(device_type=device.type, enabled=False):
-        N = world_points.shape[0]  # Number of points
-        B = cam_extrinsics.shape[0]  # Batch size, i.e., number of cameras
-        world_points_homogeneous = torch.cat(
-            [world_points, torch.ones_like(world_points[..., 0:1])], dim=1
-        )  # Nx4
-        # Reshape for batch processing
-        world_points_homogeneous = world_points_homogeneous.unsqueeze(0).expand(
-            B, -1, -1
-        )  # BxNx4
-
-        # Step 1: Apply extrinsic parameters
-        # Transform 3D points to camera coordinate system for all cameras
-        cam_points = torch.bmm(
-            cam_extrinsics, world_points_homogeneous.transpose(-1, -2)
-        )
-
-        if only_points_cam:
-            return None, cam_points
-
-        # Step 2: Apply intrinsic parameters and (optional) distortion
-        image_points = img_from_cam(cam_intrinsics, cam_points, distortion_params, default=default)
-
-        return image_points, cam_points
-
-
-
-def img_from_cam(cam_intrinsics, cam_points, distortion_params=None, default=0.0):
-    """
-    Applies intrinsic parameters and optional distortion to the given 3D points.
-
-    Args:
-        cam_intrinsics (torch.Tensor): Intrinsic camera parameters of shape Bx3x3.
-        cam_points (torch.Tensor): 3D points in camera coordinates of shape Bx3xN.
-        distortion_params (torch.Tensor, optional): Distortion parameters of shape BxN, where N can be 1, 2, or 4.
-        default (float, optional): Default value to replace NaNs in the output.
-
-    Returns:
-        pixel_coords (torch.Tensor): 2D points in pixel coordinates of shape BxNx2.
+        vector (ndarray): 6-dof pose vector comprising translation components (tx, ty, tz) and
+        rotation components (rx, ry, rz)
     """
 
-    # Normalized device coordinates (NDC)
-    cam_points = cam_points / cam_points[:, 2:3, :]
-    ndc_xy = cam_points[:, :2, :]
+    # M[1, 2] = -sinx*cosy, M[2, 2] = +cosx*cosy
+    rotx = torch.atan2(-matrix[..., 1, 2], matrix[..., 2, 2])
 
-    # Apply distortion if distortion_params are provided
-    if distortion_params is not None:
-        x_distorted, y_distorted = apply_distortion(distortion_params, ndc_xy[:, 0], ndc_xy[:, 1])
-        distorted_xy = torch.stack([x_distorted, y_distorted], dim=1)
+    # M[0, 2] = +siny, M[1, 2] = -sinx*cosy, M[2, 2] = +cosx*cosy
+    cosy = torch.sqrt(matrix[..., 1, 2] ** 2 + matrix[..., 2, 2] ** 2)
+    roty = torch.atan2(matrix[..., 0, 2], cosy)
+
+    # M[0, 0] = +cosy*cosz, M[0, 1] = -cosy*sinz
+    rotz = torch.atan2(-matrix[..., 0, 1], matrix[..., 0, 0])
+
+    rotation = torch.stack((rotx, roty, rotz), dim=-1)
+
+    # Extract translation params
+    translation = matrix[..., :3, 3]
+    return torch.cat((translation, rotation), dim=-1)
+
+
+def invert_matrix_egopose_numpy(egopose):
+    """ Compute the inverse transformation of a 4x4 egopose numpy matrix."""
+    inverse_matrix = np.zeros((4, 4), dtype=np.float32)
+    rotation = egopose[:3, :3]
+    translation = egopose[:3, 3]
+    inverse_matrix[:3, :3] = rotation.T
+    inverse_matrix[:3, 3] = -np.dot(rotation.T, translation)
+    inverse_matrix[3, 3] = 1.0
+    return inverse_matrix
+
+
+def get_global_pose(rec, nusc, inverse=False):
+    lidar_sample_data = nusc.get('sample_data', rec['data']['LIDAR_TOP'])
+
+    sd_ep = nusc.get("ego_pose", lidar_sample_data["ego_pose_token"])
+    sd_cs = nusc.get("calibrated_sensor", lidar_sample_data["calibrated_sensor_token"])
+    if inverse is False:
+        global_from_ego = transform_matrix(sd_ep["translation"], Quaternion(sd_ep["rotation"]), inverse=False)
+        ego_from_sensor = transform_matrix(sd_cs["translation"], Quaternion(sd_cs["rotation"]), inverse=False)
+        pose = global_from_ego.dot(ego_from_sensor)
     else:
-        distorted_xy = ndc_xy
-
-    # Prepare cam_points for batch matrix multiplication
-    cam_coords_homo = torch.cat(
-        (distorted_xy, torch.ones_like(distorted_xy[:, :1, :])), dim=1
-    )  # Bx3xN
-    # Apply intrinsic parameters using batch matrix multiplication
-    pixel_coords = torch.bmm(cam_intrinsics, cam_coords_homo)  # Bx3xN
-
-    # Extract x and y coordinates
-    pixel_coords = pixel_coords[:, :2, :]  # Bx2xN
-
-    # Replace NaNs with default value
-    pixel_coords = torch.nan_to_num(pixel_coords, nan=default)
-
-    return pixel_coords.transpose(1, 2)  # BxNx2
+        sensor_from_ego = transform_matrix(sd_cs["translation"], Quaternion(sd_cs["rotation"]), inverse=True)
+        ego_from_global = transform_matrix(sd_ep["translation"], Quaternion(sd_ep["rotation"]), inverse=True)
+        pose = sensor_from_ego.dot(ego_from_global)
+    return pose
 
 
-
-
-def cam_from_img(pred_tracks, intrinsics, extra_params=None):
+def pose_vec2mat(vec: torch.Tensor):
     """
-    Normalize predicted tracks based on camera intrinsics.
+    Convert 6DoF parameters to transformation matrix.
     Args:
-    intrinsics (torch.Tensor): The camera intrinsics tensor of shape [batch_size, 3, 3].
-    pred_tracks (torch.Tensor): The predicted tracks tensor of shape [batch_size, num_tracks, 2].
-    extra_params (torch.Tensor, optional): Distortion parameters of shape BxN, where N can be 1, 2, or 4.
+        vec: 6DoF parameters in the order of tx, ty, tz, rx, ry, rz [B,6]
     Returns:
-    torch.Tensor: Normalized tracks tensor.
+        A transformation matrix [B,4,4]
     """
+    translation = vec[..., :3].unsqueeze(-1)  # [...x3x1]
+    rot = vec[..., 3:].contiguous()  # [...x3]
+    rot_mat = euler2mat(rot)  # [...,3,3]
+    transform_mat = torch.cat([rot_mat, translation], dim=-1)  # [...,3,4]
+    transform_mat = torch.nn.functional.pad(transform_mat, [0, 0, 0, 1], value=0)  # [...,4,4]
+    transform_mat[..., 3, 3] = 1.0
+    return transform_mat
 
-    # We don't want to do intrinsics_inv = torch.inverse(intrinsics) here
-    # otherwise we can use something like
-    #     tracks_normalized_homo = torch.bmm(pred_tracks_homo, intrinsics_inv.transpose(1, 2))
 
-    principal_point = intrinsics[:, [0, 1], [2, 2]].unsqueeze(-2)
-    focal_length = intrinsics[:, [0, 1], [0, 1]].unsqueeze(-2)
-    tracks_normalized = (pred_tracks - principal_point) / focal_length
+def warp_features(x, flow, mode='nearest', spatial_extent=None):
+    """ Applies a rotation and translation to feature map x.
+        Args:
+            x: (b, c, h, w) feature map
+            flow: (b, 6) 6DoF vector (only uses the xy poriton)
+            mode: use 'nearest' when dealing with categorical inputs
+        Returns:
+            in plane transformed feature map
+        """
+    if flow is None:
+        return x
+    b, c, h, w = x.shape
+    # z-rotation
+    angle = flow[:, 5].clone()  # torch.atan2(flow[:, 1, 0], flow[:, 0, 0])
+    # x-y translation
+    translation = flow[:, :2].clone()  # flow[:, :2, 3]
 
-    if extra_params is not None:
-        # Apply iterative undistortion
-        try:
-            tracks_normalized = iterative_undistortion(
-                extra_params, tracks_normalized
-            )
-        except:
-            tracks_normalized = single_undistortion(
-                extra_params, tracks_normalized
-            )
+    # Normalise translation. Need to divide by how many meters is half of the image.
+    # because translation of 1.0 correspond to translation of half of the image.
+    translation[:, 0] /= spatial_extent[0]
+    translation[:, 1] /= spatial_extent[1]
+    # forward axis is inverted
+    translation[:, 0] *= -1
 
-    return tracks_normalized
+    cos_theta = torch.cos(angle)
+    sin_theta = torch.sin(angle)
+
+    # output = Rot.input + translation
+    # tx and ty are inverted as is the case when going from real coordinates to numpy coordinates
+    # translation_pos_0 -> positive value makes the image move to the left
+    # translation_pos_1 -> positive value makes the image move to the top
+    # Angle -> positive value in rad makes the image move in the trigonometric way
+    transformation = torch.stack([cos_theta, -sin_theta, translation[:, 1],
+                                  sin_theta, cos_theta, translation[:, 0]], dim=-1).view(b, 2, 3)
+
+    # Note that a rotation will preserve distances only if height = width. Otherwise there's
+    # resizing going on. e.g. rotation of pi/2 of a 100x200 image will make what's in the center of the image
+    # elongated.
+    grid = torch.nn.functional.affine_grid(transformation, size=x.shape, align_corners=False)
+    grid = grid.to(dtype=x.dtype)
+    warped_x = torch.nn.functional.grid_sample(x, grid, mode=mode, padding_mode='zeros', align_corners=False)
+
+    return warped_x
+
+
+def euler2mat(angle: torch.Tensor):
+    """Convert euler angles to rotation matrix.
+    Reference: https://github.com/pulkitag/pycaffe-utils/blob/master/rot_utils.py#L174
+    Args:
+        angle: rotation angle along 3 axis (in radians) [Bx3]
+    Returns:
+        Rotation matrix corresponding to the euler angles [Bx3x3]
+    """
+    shape = angle.shape
+    angle = angle.view(-1, 3)
+    x, y, z = angle[:, 0], angle[:, 1], angle[:, 2]
+
+    cosz = torch.cos(z)
+    sinz = torch.sin(z)
+
+    zeros = torch.zeros_like(z)
+    ones = torch.ones_like(z)
+    zmat = torch.stack([cosz, -sinz, zeros, sinz, cosz, zeros, zeros, zeros, ones], dim=1).view(-1, 3, 3)
+
+    cosy = torch.cos(y)
+    siny = torch.sin(y)
+
+    ymat = torch.stack([cosy, zeros, siny, zeros, ones, zeros, -siny, zeros, cosy], dim=1).view(-1, 3, 3)
+
+    cosx = torch.cos(x)
+    sinx = torch.sin(x)
+
+    xmat = torch.stack([ones, zeros, zeros, zeros, cosx, -sinx, zeros, sinx, cosx], dim=1).view(-1, 3, 3)
+
+    rot_mat = xmat.bmm(ymat).bmm(zmat)
+    rot_mat = rot_mat.view(*shape[:-1], 3, 3)
+    return rot_mat
