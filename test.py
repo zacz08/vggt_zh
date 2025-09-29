@@ -12,8 +12,12 @@ from utils.viser_tools import viser_wrapper
 
 
 # ---------- 参数 ----------
-person_id    = 0   # COCO 类别编号
-car_id       = 2
+instance_list = ['person',
+                 'bicycle',
+                 'car',
+                 'motorcycle',
+                 'bus',
+                 'truck']  # reference COCO 80 classes
 # -------------------------
 
     
@@ -49,11 +53,17 @@ with torch.no_grad():
             img = img.clone()
 
             if result.masks is not None:
-                # result.masks.data: [num_objects, H, W], 0/1 float tensor
+                cls_ids = result.boxes.cls.to(torch.int64)      # [num_objects]
                 masks = result.masks.data.to(img.device)   # 确保在同一个 device
-                combined_mask = masks.sum(dim=0).clamp(max=1)  # 合并所有实例 mask → [H, W]
-                combined_mask = combined_mask.unsqueeze(0).repeat(3, 1, 1)  # 扩展到通道维度 [3, H, W]
-                img = img * (1 - combined_mask) # 在 mask 区域置 0
+
+                # 根据 instance_list 过滤
+                keep_idx = [i for i, cls_id in enumerate(cls_ids) if result.names[int(cls_id)] in instance_list]
+
+                if len(keep_idx) > 0:
+                    selected_masks = masks[keep_idx]            # 只保留需要的 mask
+                    combined_mask = selected_masks.sum(dim=0).clamp(max=1)  # 合并所有实例 mask → [H, W]
+                    combined_mask = combined_mask.unsqueeze(0).repeat(3, 1, 1)  # 扩展到通道维度 [3, H, W]
+                    img = img * (1 - combined_mask) # 在 mask 区域置 0
 
             masked_images.append(img)
 
