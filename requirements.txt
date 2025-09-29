@@ -6,4 +6,4 @@ huggingface_hub
 einops
 safetensors
 omegaconf
-nuscene-devkit
+nuscenes-devkit
